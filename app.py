@@ -112,14 +112,42 @@ if CLIENT_DEMO:
     debug_mode = False
 
     try:
+        existing_files = rag_engine.get_existing_files()
+
+        # 1) Prova a caricare un indice già esistente nel container corrente.
         if st.session_state.rag_index is None:
             st.session_state.rag_index = rag_engine.load_existing_index()
+
         kb_state = rag_engine.get_kb_state()
+
+        # 2) Su Streamlit Cloud chroma_db/ può sparire dopo reboot/redeploy.
+        # Se i documenti demo versionati in data/ ci sono ma la KB non è pronta,
+        # ricostruiamo l'indice automaticamente.
+        needs_rebuild = bool(existing_files) and (
+            st.session_state.rag_index is None or not kb_state.get("ready")
+        )
+
+        if needs_rebuild:
+            with st.spinner("Sto preparando l'assistente sui materiali disponibili..."):
+                rebuilt_index = rag_engine.create_or_rebuild_index()
+
+            # Alcune versioni di create_or_rebuild_index possono creare Chroma ma non restituire
+            # subito l'oggetto index: in quel caso proviamo a ricaricarlo.
+            st.session_state.rag_index = rebuilt_index or rag_engine.load_existing_index()
+            kb_state = rag_engine.get_kb_state()
+
+        # Diagnostica visibile solo se abiliti BITNESS_SHOW_TECH=1 nei secrets.
+        if SHOW_TECH:
+            with st.expander("Diagnostica avvio assistente"):
+                st.write("Documenti trovati in data/:", [f.name for f in existing_files])
+                st.write("Indice in sessione:", st.session_state.rag_index is not None)
+                st.write("Stato KB:", kb_state)
+
     except Exception as exc:
         kb_state = {"ready": False, "documents": 0, "chunks": 0, "mode_label": "RAG reale"}
         if SHOW_TECH:
             st.error("Assistente non disponibile.")
-            st.caption(str(exc))
+            st.exception(exc)
 
 else:
     with st.sidebar:
@@ -209,7 +237,7 @@ if not CLIENT_DEMO:
 if not kb_state.get("ready"):
     if CLIENT_DEMO:
         st.warning(
-            "Assistente non ancora preparato. Apri prima la modalità tecnica, carica i documenti e prepara l’assistente."
+            "Sto preparando l’assistente sui materiali disponibili. Se il messaggio resta visibile, abilita BITNESS_SHOW_TECH=1 nei Secrets e controlla la diagnostica."
         )
     else:
         st.warning(
@@ -260,6 +288,14 @@ if question:
         try:
             with placeholder.container():
                 with st.spinner(waiting_text):
+                    # Fallback: se per qualunque motivo l'indice non è ancora in sessione,
+                    # lo ricreiamo/ricarichiamo proprio prima della risposta.
+                    if st.session_state.rag_index is None and rag_engine.get_existing_files():
+                        st.session_state.rag_index = (
+                            rag_engine.create_or_rebuild_index()
+                            or rag_engine.load_existing_index()
+                        )
+
                     result = rag_engine.answer_question(
                         question=question,
                         index=st.session_state.rag_index,
